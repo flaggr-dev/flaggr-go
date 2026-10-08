@@ -1,0 +1,4 @@
+# Test binaries and coverage output
+*.test
+*.out
+coverage.*

@@ -31,8 +31,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+)
+
+const (
+	// maxResponseBytes caps how much of a response body the client reads.
+	// Evaluation responses are a few kilobytes.
+	maxResponseBytes = 4 << 20
+
+	// maxErrorBodyBytes caps how much of an error response body is quoted in
+	// the returned error.
+	maxErrorBodyBytes = 512
 )
 
 // CachedFlag stores flag configuration for zero-network local in-process evaluation.
@@ -79,29 +91,37 @@ type EvaluationDetail struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithAPIURL sets the Flaggr API URL.
+// WithAPIURL sets the Flaggr API URL. Surrounding whitespace and trailing
+// slashes are removed.
 func WithAPIURL(url string) Option {
-	return func(c *Client) { c.apiURL = url }
+	return func(c *Client) { c.apiURL = strings.TrimRight(strings.TrimSpace(url), "/") }
 }
 
-// WithAPIKey sets the API authentication token.
+// WithAPIKey sets the API authentication token. Surrounding whitespace, such
+// as a trailing newline, is removed.
 func WithAPIKey(key string) Option {
-	return func(c *Client) { c.apiKey = key }
+	return func(c *Client) { c.apiKey = strings.TrimSpace(key) }
 }
 
-// WithServiceID sets the service identifier for evaluations.
+// WithServiceID sets the service identifier for evaluations. Surrounding
+// whitespace is removed.
 func WithServiceID(id string) Option {
-	return func(c *Client) { c.serviceID = id }
+	return func(c *Client) { c.serviceID = strings.TrimSpace(id) }
 }
 
 // WithEnvironment sets the target environment (default: "production").
+// Surrounding whitespace is removed.
 func WithEnvironment(env string) Option {
-	return func(c *Client) { c.environment = env }
+	return func(c *Client) { c.environment = strings.TrimSpace(env) }
 }
 
-// WithHTTPClient sets a custom HTTP client.
+// WithHTTPClient sets a custom HTTP client. A nil client keeps the default.
 func WithHTTPClient(hc *http.Client) Option {
-	return func(c *Client) { c.httpClient = hc }
+	return func(c *Client) {
+		if hc != nil {
+			c.httpClient = hc
+		}
+	}
 }
 
 // WithLocalEvaluation enables zero-network in-process memory evaluation.
@@ -370,13 +390,16 @@ func (c *Client) evaluateDetail(ctx context.Context, flagKey string, defaultValu
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("flaggr: read error: %w", err)
 	}
+	if len(respBody) > maxResponseBytes {
+		return nil, fmt.Errorf("flaggr: evaluation failed: %d: response body larger than %d bytes", resp.StatusCode, maxResponseBytes)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("flaggr: evaluation failed: %d %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("flaggr: evaluation failed: %d %s", resp.StatusCode, truncateBody(respBody, maxErrorBodyBytes))
 	}
 
 	var detail EvaluationDetail
@@ -385,4 +408,17 @@ func (c *Client) evaluateDetail(ctx context.Context, flagKey string, defaultValu
 	}
 
 	return &detail, nil
+}
+
+// truncateBody returns body as a string, cut to at most limit bytes on a rune
+// boundary.
+func truncateBody(body []byte, limit int) string {
+	if len(body) <= limit {
+		return string(body)
+	}
+	cut := limit
+	for cut > limit-utf8.UTFMax+1 && cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return string(body[:cut]) + "... (truncated)"
 }

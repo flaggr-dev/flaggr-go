@@ -65,9 +65,11 @@ Every request sends the token in an `Authorization: Bearer <token>` header.
 | `WithAPIKey(token)` | required | Project API token |
 | `WithServiceID(id)` | required | Service ID |
 | `WithEnvironment(env)` | `"production"` | The environment to evaluate in, such as `development` or `staging` |
-| `WithAPIURL(url)` | `"https://flaggr.dev"` | Base URL of the Flaggr API |
-| `WithHTTPClient(hc)` | `&http.Client{Timeout: 5 * time.Second}` | Your own `*http.Client`, for timeouts, proxies or a custom transport |
+| `WithAPIURL(url)` | `"https://flaggr.dev"` | Base URL of the Flaggr API. `https://api.flaggr.dev` is the data plane (see [Rate limits](#rate-limits)) |
+| `WithHTTPClient(hc)` | `&http.Client{Timeout: 5 * time.Second}` | Your own `*http.Client`, for timeouts, proxies or a custom transport. `nil` keeps the default |
 | `WithLocalEvaluation(true)` | `false` | Answers `Boolean` and `String` from the local cache (see [Local evaluation](#local-evaluation)) |
+
+The options remove surrounding whitespace from the API key, service ID, environment and URL, so a value read from an environment variable or a secrets file with a trailing newline still works. They also remove trailing slashes from the URL.
 
 `NewClient` returns an error when the API key or the service ID is empty. Each flag is configured separately in each environment, so a key can return different values in `development`, `staging` and `production`. See [Environments](https://flaggr.dev/docs/platform/environments).
 
@@ -108,9 +110,15 @@ if err == nil {
 
 `TargetingKey` is usually the user ID. Overrides and percentage rollouts are based on it. `Attributes` hold the values that your targeting rules match on. Attribute values must be strings, numbers or booleans: `https://flaggr.dev` returns `400 Bad Request` for nested objects, arrays and `nil`. See [Targeting Rules](https://flaggr.dev/docs/guides/targeting-rules).
 
+### Rate limits
+
+Outside local evaluation, each call to `Boolean`, `String`, `Number`, `Object` or `Resolve` is one HTTPS request, and the client doesn't cache answers. The default base URL, `https://flaggr.dev`, allows 1,000 requests a minute from one IP address, 5,000 per token and 10,000 per service. Past that it answers `429 Too Many Requests`, and the typed methods return your default with an error. See [Rate Limiting](https://flaggr.dev/docs/guides/rate-limiting).
+
+In a busy service, evaluate each flag once per request or job and pass the value along. You can also send evaluations to the data plane with `flaggr.WithAPIURL("https://api.flaggr.dev")`, which the TypeScript SDK uses by default. The data plane doesn't assign experiments yet, so a flag with a running experiment can return a different variant there than on `https://flaggr.dev`.
+
 ## Error handling
 
-The evaluation methods don't panic. A request can fail because of a network error, a timeout or a status other than 200, such as 401, 403 or 429. When it does, the typed methods return your default value and a non-nil error, and `Resolve` returns a nil detail and the error. Log the error and use the default:
+The evaluation methods don't panic. A request can fail because of a network error, a timeout or a status other than 200, such as 401, 403 or 429. When it does, the typed methods return your default value and a non-nil error, and `Resolve` returns a nil detail and the error. The error names the status and quotes up to 512 bytes of the response body. Log the error and use the default:
 
 ```go
 enabled, err := client.Boolean(ctx, "checkout-v2", false, user)
@@ -163,7 +171,27 @@ Targeting rules and percentage rollouts are evaluated only by the API. `SetFlag`
 
 ## OpenFeature
 
-Flaggr also serves the [OpenFeature Remote Evaluation Protocol (OFREP)](https://flaggr.dev/docs/api/ofrep). To use the OpenFeature Go SDK instead of this client, see the [Go SDK guide](https://flaggr.dev/docs/sdk/go-sdk).
+Flaggr also serves the [OpenFeature Remote Evaluation Protocol (OFREP)](https://flaggr.dev/docs/api/ofrep). To use the [OpenFeature Go SDK](https://openfeature.dev/docs/reference/technologies/server/go) instead of this client, use its OFREP provider:
+
+```bash
+go get github.com/open-feature/go-sdk github.com/open-feature/go-sdk-contrib/providers/ofrep
+```
+
+```go
+provider := ofrep.NewProvider("https://api.flaggr.dev/api",
+	ofrep.WithBearerToken(os.Getenv("FLAGGR_API_KEY")),
+	ofrep.WithHeader("X-Service-Id", os.Getenv("FLAGGR_SERVICE_ID")),
+	ofrep.WithHeader("X-Environment", "production"),
+)
+if err := openfeature.SetProviderAndWait(provider); err != nil {
+	log.Fatal(err)
+}
+client := openfeature.NewClient("my-service")
+
+enabled, err := client.BooleanValue(ctx, "checkout-v2", false, openfeature.NewEvaluationContext("user-123", nil))
+```
+
+The provider adds `/ofrep/v1/evaluate/flags/{key}` to the base URL itself. Set the `X-Environment` header: OFREP evaluates in `development` by default, while this client defaults to `production`. `https://api.flaggr.dev/api` is the data plane, which doesn't assign experiments yet. To get the same experiment assignments as this client's default, use `https://flaggr.dev/api` as the base URL.
 
 ## Documentation
 
@@ -172,6 +200,10 @@ Flaggr also serves the [OpenFeature Remote Evaluation Protocol (OFREP)](https://
 - [REST API reference](https://flaggr.dev/docs/api/rest-endpoints)
 - [API tokens](https://flaggr.dev/docs/api/tokens)
 - [Package reference](https://pkg.go.dev/github.com/flaggr-dev/flaggr-go)
+
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 

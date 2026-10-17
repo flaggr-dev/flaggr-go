@@ -206,6 +206,30 @@ What the package does:
 - **Bad tokens.** If Flaggr refuses the token, the reporter stops sending and tells you through `Options.Logf`.
 - **Opting out.** `Options.Disabled` turns the reporter into a no-op.
 
+### Tracing
+
+Set `TracesSampleRate` and the middleware also records requests as spans for Flaggr's **Performance** page. That page shows throughput, p50/p95/p99 latency and failures per route, plus each trace's waterfall:
+
+```go
+reporter := errorreport.New(errorreport.Options{Token: token, Release: "checkout-api@2.8.1", TracesSampleRate: 0.1})
+mux.HandleFunc("GET /orders/{id}", getOrder)             // spans are named "GET /orders/{id}" (Go 1.23+)
+http.ListenAndServe(":8080", reporter.Middleware(mux))
+
+func getOrder(w http.ResponseWriter, r *http.Request) {
+	span, ctx := reporter.StartSpan(r.Context(), "load order", "db.query") // a child span
+	defer span.End()
+	client := &http.Client{Transport: reporter.Transport(nil)}           // sends traceparent downstream
+	req, _ := http.NewRequestWithContext(ctx, "GET", pricingURL, nil)
+	_, _ = client.Do(req)
+}
+```
+
+How tracing behaves:
+
+- **Propagation.** The middleware continues an incoming W3C `traceparent` header and follows the caller's sampling decision. `Transport` passes `traceparent` on to the services you call, and records each call as an `http.client` span.
+- **Linking errors to traces.** Errors captured with `WithRequest(r)` or `WithContext(ctx)` carry the trace id, so the issue links to its trace. This works even when the trace isn't sampled.
+- **Joining the browser.** An `X-Request-Id` request header is recorded on the span, and Flaggr uses it to find the page load that made the request.
+
 ## OpenFeature
 
 Flaggr also serves the [OpenFeature Remote Evaluation Protocol (OFREP)](https://flaggr.dev/docs/api/ofrep). To use the [OpenFeature Go SDK](https://openfeature.dev/docs/reference/technologies/server/go) instead of this client, use its OFREP provider:

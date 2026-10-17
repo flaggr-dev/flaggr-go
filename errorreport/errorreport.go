@@ -53,7 +53,11 @@ const (
 	// The most events queued, sent per batch, and sent per minute.
 	maxQueue     = 100
 	maxPerMinute = 60
-	maxCrumbs    = 50
+	// The ingest's batch cap, the most spans queued, and spans sent per minute.
+	maxBatch          = 100
+	maxSpanQueue      = 1000
+	maxSpansPerMinute = 3000
+	maxCrumbs         = 50
 )
 
 // Level is how severe an event is.
@@ -97,6 +101,12 @@ type Options struct {
 	Disabled bool
 	// Logf reports why sending stopped (default: none). log.Printf fits.
 	Logf func(format string, args ...any)
+	// TracesSampleRate records this share of requests (0 to 1) as spans for
+	// Flaggr's Performance page: Middleware's request spans, StartSpan's child
+	// spans and Transport's outgoing calls. Zero (the default) records none,
+	// but still continues an incoming traceparent so errors carry its trace id.
+	// A sampled caller's traceparent is always followed.
+	TracesSampleRate float64
 }
 
 // Breadcrumb is something that happened before an error.
@@ -127,6 +137,10 @@ type Event struct {
 	Flags       map[string]string
 	Extra       map[string]any
 	Breadcrumbs []Breadcrumb
+	// TraceID and SpanID tie the event to a trace (set from a traced request
+	// by WithRequest or WithContext): the issue links to it.
+	TraceID string
+	SpanID  string
 }
 
 // CaptureOption adds to one event.
@@ -168,7 +182,8 @@ func WithFingerprint(key string) CaptureOption { return func(e *Event) { e.Finge
 // WithLevel sets the event's level (default error).
 func WithLevel(level Level) CaptureOption { return func(e *Event) { e.Level = level } }
 
-// WithRequest records the request's method and route (its path, without the query string).
+// WithRequest records the request's method and route (its path, without the
+// query string), and its trace when Middleware traced it.
 func WithRequest(r *http.Request) CaptureOption {
 	return func(e *Event) {
 		if r == nil {
@@ -177,6 +192,17 @@ func WithRequest(r *http.Request) CaptureOption {
 		e.Method = r.Method
 		if r.URL != nil {
 			e.Route = r.URL.Path
+		}
+		WithContext(r.Context())(e)
+	}
+}
+
+// WithContext ties the event to the trace in ctx (Middleware's request, or a
+// StartSpan span), so the issue links to the trace.
+func WithContext(ctx context.Context) CaptureOption {
+	return func(e *Event) {
+		if tc, ok := traceFrom(ctx); ok {
+			e.TraceID, e.SpanID = tc.traceID, tc.spanID
 		}
 	}
 }
@@ -199,6 +225,9 @@ type Reporter struct {
 	userID  string
 	crumbs  []Breadcrumb
 	stopped bool
+	// Spans waiting to be sent (already in the wire format), and when the last minute's were recorded.
+	spans      []wireEvent
+	spanSentAt []time.Time
 
 	wake    chan struct{}
 	flushes chan chan struct{}
@@ -455,21 +484,37 @@ func (r *Reporter) loop() {
 func (r *Reporter) sendQueued() {
 	r.mu.Lock()
 	events := r.queue
-	r.queue = nil
+	spans := r.spans
+	r.queue, r.spans = nil, nil
 	stopped := r.stopped
 	r.mu.Unlock()
-	if stopped || len(events) == 0 {
+	if stopped || len(events)+len(spans) == 0 {
 		return
 	}
-	body, err := json.Marshal(map[string]any{"events": wireEvents(events, r.opts.ServiceID)})
+	all := append(wireEvents(events, r.opts.ServiceID), spans...)
+	// The ingest takes at most maxBatch events a request.
+	for start := 0; start < len(all); start += maxBatch {
+		end := start + maxBatch
+		if end > len(all) {
+			end = len(all)
+		}
+		if !r.post(all[start:end]) {
+			return
+		}
+	}
+}
+
+// post sends one batch; false when sending should stop (refused, or the ingest isn't there).
+func (r *Reporter) post(batch []wireEvent) bool {
+	body, err := json.Marshal(map[string]any{"events": batch})
 	if err != nil {
-		return
+		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(body))
 	if err != nil {
-		return
+		return true
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if r.opts.Token != "" {
@@ -478,22 +523,25 @@ func (r *Reporter) sendQueued() {
 	req.Header.Set("User-Agent", "flaggr-go-errorreport")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return // offline: these events are lost, as a crash reporter's are
+		return true // offline: these events are lost, as a crash reporter's are
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		r.stop(fmt.Sprintf("flaggr errorreport: %s refused the token (%d); it needs a project API token, not an SDK key. No more errors are sent.", r.url, resp.StatusCode))
+		return false
 	case http.StatusNotFound, http.StatusMethodNotAllowed:
 		r.stop(fmt.Sprintf("flaggr errorreport: %s doesn't take errors (%d); set Options.AppURL to the Flaggr app's URL. No more errors are sent.", r.url, resp.StatusCode))
+		return false
 	}
+	return true
 }
 
 func (r *Reporter) stop(reason string) {
 	r.mu.Lock()
 	r.stopped = true
-	r.queue = nil
+	r.queue, r.spans = nil, nil
 	r.mu.Unlock()
 	if r.opts.Logf != nil {
 		r.opts.Logf("%s", reason)
@@ -511,6 +559,7 @@ type wireEvent struct {
 	Route       string         `json:"route,omitempty"`
 	Method      string         `json:"method,omitempty"`
 	StatusCode  int            `json:"statusCode,omitempty"`
+	DurationMs  *int           `json:"durationMs,omitempty"`
 	Release     string         `json:"release,omitempty"`
 	Timestamp   string         `json:"timestamp"`
 	Data        map[string]any `json:"data"`
@@ -538,6 +587,12 @@ func wireEvents(events []*Event, serviceID string) []wireEvent {
 		}
 		if len(e.Breadcrumbs) > 0 {
 			data["breadcrumbs"] = e.Breadcrumbs
+		}
+		if e.TraceID != "" {
+			data["traceId"] = e.TraceID
+			if e.SpanID != "" {
+				data["spanId"] = e.SpanID
+			}
 		}
 		fingerprint := ""
 		if e.Fingerprint != "" {

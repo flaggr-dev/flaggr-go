@@ -16,7 +16,7 @@ import (
 // WithRequest(r) or WithContext(r.Context()) carry it, StartSpan and
 // Transport continue it), and, when the trace is sampled (TracesSampleRate),
 // records the request as a span named by its ServeMux pattern
-// ("GET /orders/{id}", Go 1.23+), else its path.
+// ("GET /orders/{id}"), or its path when no pattern served it.
 func (r *Reporter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		span, traced := r.startRequestSpan(req)

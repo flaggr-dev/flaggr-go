@@ -14,7 +14,7 @@ The client evaluates flags through the Flaggr REST API. It has typed methods for
 go get github.com/flaggr-dev/flaggr-go@latest
 ```
 
-The module needs Go 1.22 or later and uses only the standard library. The package name is `flaggr`.
+The module needs Go 1.27 or later and uses only the standard library. The package name is `flaggr`.
 
 ## Quick start
 
@@ -212,7 +212,7 @@ Set `TracesSampleRate` and the middleware also records requests as spans for Fla
 
 ```go
 reporter := errorreport.New(errorreport.Options{Token: token, Release: "checkout-api@2.8.1", TracesSampleRate: 0.1})
-mux.HandleFunc("GET /orders/{id}", getOrder)             // spans are named "GET /orders/{id}" (Go 1.23+)
+mux.HandleFunc("GET /orders/{id}", getOrder)             // spans are named "GET /orders/{id}"
 http.ListenAndServe(":8080", reporter.Middleware(mux))
 
 func getOrder(w http.ResponseWriter, r *http.Request) {

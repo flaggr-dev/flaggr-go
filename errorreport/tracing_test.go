@@ -37,12 +37,7 @@ func TestMiddlewareRecordsASampledRequestSpanNamedByItsPattern(t *testing.T) {
 	}
 	span := spans[0]
 	data := span["data"].(map[string]any)
-	// Go 1.23+ names the span by the mux pattern; before it, by the path.
-	route := "/orders/42"
-	if patternNaming {
-		route = "/orders/{id}"
-	}
-	if span["name"] != "GET "+route || span["route"] != route || span["method"] != "GET" ||
+	if span["name"] != "GET /orders/{id}" || span["route"] != "/orders/{id}" || span["method"] != "GET" ||
 		span["statusCode"] != float64(418) || span["serviceId"] != "svc-1" || span["release"] != "api@2" {
 		t.Errorf("span = %v", span)
 	}

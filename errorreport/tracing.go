@@ -305,3 +305,13 @@ func (r *Reporter) Transport(base http.RoundTripper) http.RoundTripper {
 type roundTripper func(*http.Request) (*http.Response, error)
 
 func (f roundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// routePattern is the ServeMux pattern that served the request ("/orders/{id}"),
+// without its method, or "" when none did.
+func routePattern(r *http.Request) string {
+	pattern := r.Pattern
+	if i := strings.IndexByte(pattern, ' '); i >= 0 {
+		pattern = strings.TrimSpace(pattern[i+1:])
+	}
+	return pattern
+}

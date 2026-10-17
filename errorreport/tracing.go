@@ -12,9 +12,11 @@ import (
 )
 
 // Tracing: W3C trace context (traceparent) propagation and spans for
-// Flaggr's Performance page. A trace is sampled once, where it starts
-// (TracesSampleRate, or the caller's traceparent flag), and every span of it
-// follows that decision. Spans are sent as events of kind "span" with the
+// Flaggr's Performance page. A trace is sampled where it enters a service
+// that decides: a sampled caller's traceparent is always followed; an
+// unsampled caller's (a browser that only propagates ids) is sampled by this
+// service's TracesSampleRate, keeping its trace id. Every span of a request
+// follows the request's decision. Spans are sent as events of kind "span" with the
 // trace in data (traceId, spanId, parentSpanId, op, requestId, sampleRate),
 // the conventions Flaggr reads.
 
@@ -231,6 +233,11 @@ func (r *Reporter) startRequestSpan(req *http.Request) (*Span, *http.Request) {
 	parentID := ""
 	if traceID, parent, sampled, ok := parseTraceparent(req.Header.Get("traceparent")); ok {
 		tc.traceID, parentID, tc.sampled = traceID, parent, sampled
+		// A caller that didn't sample (a browser propagating ids only) leaves
+		// the decision to this service: same trace, sampled at its own rate.
+		if !sampled {
+			tc.sampled, tc.localDecision = r.sampleTrace(), true
+		}
 	} else {
 		tc.traceID, tc.sampled, tc.localDecision = randomHex(16), r.sampleTrace(), true
 	}

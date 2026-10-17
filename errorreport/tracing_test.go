@@ -199,3 +199,16 @@ func TestParseTraceparent(t *testing.T) {
 		}
 	}
 }
+
+func TestAnUnsampledCallersTraceIsSampledAtTheServicesRate(t *testing.T) {
+	in, srv := newIngest(t, http.StatusAccepted)
+	r := newReporter(srv, Options{TracesSampleRate: 1})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+	r.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	r.Close()
+	spans := spansOf(in.events())
+	if len(spans) != 1 || spans[0]["data"].(map[string]any)["traceId"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("spans = %v", spans)
+	}
+}

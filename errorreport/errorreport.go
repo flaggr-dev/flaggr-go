@@ -105,7 +105,8 @@ type Options struct {
 	// Flaggr's Performance page: Middleware's request spans, StartSpan's child
 	// spans and Transport's outgoing calls. Zero (the default) records none,
 	// but still continues an incoming traceparent so errors carry its trace id.
-	// A sampled caller's traceparent is always followed.
+	// A sampled caller's traceparent is always followed; an unsampled
+	// caller's trace is sampled at this rate.
 	TracesSampleRate float64
 }
 

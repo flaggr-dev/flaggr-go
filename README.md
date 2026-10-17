@@ -226,7 +226,7 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 
 How tracing behaves:
 
-- **Propagation.** The middleware continues an incoming W3C `traceparent` header and follows the caller's sampling decision. `Transport` passes `traceparent` on to the services you call, and records each call as an `http.client` span.
+- **Propagation.** The middleware continues an incoming W3C `traceparent` header. It follows a caller that sampled the trace; for a caller that didn't (such as a browser that only passes the ids along), it samples the trace at its own `TracesSampleRate` and keeps the trace id. `Transport` passes `traceparent` on to the services you call, and records each call as an `http.client` span.
 - **Linking errors to traces.** Errors captured with `WithRequest(r)` or `WithContext(ctx)` carry the trace id, so the issue links to its trace. This works even when the trace isn't sampled.
 - **Joining the browser.** An `X-Request-Id` request header is recorded on the span, and Flaggr uses it to find the page load that made the request.
 

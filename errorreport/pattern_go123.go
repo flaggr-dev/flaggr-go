@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// patternNaming: requests are named by their ServeMux pattern.
+const patternNaming = true
+
 // routePattern is the ServeMux pattern that served the request ("/orders/{id}"),
 // without its method, or "" when none did (Request.Pattern, Go 1.23+).
 func routePattern(r *http.Request) string {

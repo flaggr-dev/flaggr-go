@@ -169,6 +169,43 @@ Local evaluation works like this:
 
 Targeting rules and percentage rollouts are evaluated only by the API. `SetFlag` adds or replaces one flag, `InvalidateFlag` removes one, and `LoadFlags` replaces the whole cache. A `Client` is safe for concurrent use.
 
+## Error reporting
+
+The `errorreport` package sends your program's errors and panics to Flaggr. The console's **Issues** page groups them into issues and shows which flag variants each issue happens under. It needs a project API token (`fgr_...`), because Flaggr refuses SDK keys for error reports.
+
+```go
+import "github.com/flaggr-dev/flaggr-go/errorreport"
+
+func main() {
+	reporter := errorreport.New(errorreport.Options{
+		Token:       os.Getenv("FLAGGR_ERRORS_TOKEN"), // the default when Token is empty
+		Release:     "checkout-api@2.8.1",
+		Environment: "production",
+	})
+	defer reporter.Close()   // sends what is queued
+	defer reporter.Recover() // reports a panic, then re-panics
+
+	http.Handle("/", reporter.Middleware(mux)) // reports handler panics with the method and path
+
+	if err := placeOrder(ctx); err != nil {
+		reporter.CaptureError(err,
+			errorreport.WithTags(map[string]string{"step": "pay"}),
+			errorreport.WithFlags(map[string]string{"coupon-engine": variant}),
+			errorreport.WithUser(userID),
+		)
+	}
+}
+```
+
+What the package does:
+
+- **Grouping.** Flaggr groups events by the innermost frames of your own code, without line numbers, so a deploy doesn't split an issue. Use `WithFingerprint` to choose the group yourself.
+- **Flags.** `SetFlag` records a flag's variant for every later event, and `WithFlags` sets the variants on one event.
+- **Context.** `SetTag`, `SetUser` and `AddBreadcrumb` add to the events that follow.
+- **Sending.** Events are sent in the background in batches. Messages and stacks are cut to 2,000 characters. At most 60 events are sent a minute.
+- **Bad tokens.** If Flaggr refuses the token, the reporter stops sending and tells you through `Options.Logf`.
+- **Opting out.** `Options.Disabled` turns the reporter into a no-op.
+
 ## OpenFeature
 
 Flaggr also serves the [OpenFeature Remote Evaluation Protocol (OFREP)](https://flaggr.dev/docs/api/ofrep). To use the [OpenFeature Go SDK](https://openfeature.dev/docs/reference/technologies/server/go) instead of this client, use its OFREP provider:

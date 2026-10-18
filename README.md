@@ -14,7 +14,7 @@ The client evaluates flags through the Flaggr REST API. It has typed methods for
 go get github.com/flaggr-dev/flaggr-go@latest
 ```
 
-The module needs Go 1.22 or later and uses only the standard library. The package name is `flaggr`.
+The module needs Go 1.27 or later and uses only the standard library. The package name is `flaggr`.
 
 ## Quick start
 
@@ -168,6 +168,67 @@ Local evaluation works like this:
 - Cached values of the wrong type are skipped.
 
 Targeting rules and percentage rollouts are evaluated only by the API. `SetFlag` adds or replaces one flag, `InvalidateFlag` removes one, and `LoadFlags` replaces the whole cache. A `Client` is safe for concurrent use.
+
+## Error reporting
+
+The `errorreport` package sends your program's errors and panics to Flaggr. The console's **Issues** page groups them into issues and shows which flag variants each issue happens under. It needs a project API token (`fgr_...`), because Flaggr refuses SDK keys for error reports.
+
+```go
+import "github.com/flaggr-dev/flaggr-go/errorreport"
+
+func main() {
+	reporter := errorreport.New(errorreport.Options{
+		Token:       os.Getenv("FLAGGR_ERRORS_TOKEN"), // the default when Token is empty
+		Release:     "checkout-api@2.8.1",
+		Environment: "production",
+	})
+	defer reporter.Close()   // sends what is queued
+	defer reporter.Recover() // reports a panic, then re-panics
+
+	http.Handle("/", reporter.Middleware(mux)) // reports handler panics with the method and path
+
+	if err := placeOrder(ctx); err != nil {
+		reporter.CaptureError(err,
+			errorreport.WithTags(map[string]string{"step": "pay"}),
+			errorreport.WithFlags(map[string]string{"coupon-engine": variant}),
+			errorreport.WithUser(userID),
+		)
+	}
+}
+```
+
+What the package does:
+
+- **Grouping.** Flaggr groups events by the innermost frames of your own code, without line numbers, so a deploy doesn't split an issue. Use `WithFingerprint` to choose the group yourself.
+- **Flags.** `SetFlag` records a flag's variant for every later event, and `WithFlags` sets the variants on one event.
+- **Context.** `SetTag`, `SetUser` and `AddBreadcrumb` add to the events that follow.
+- **Sending.** Events are sent in the background in batches. Messages and stacks are cut to 2,000 characters. At most 60 events are sent a minute.
+- **Bad tokens.** If Flaggr refuses the token, the reporter stops sending and tells you through `Options.Logf`.
+- **Opting out.** `Options.Disabled` turns the reporter into a no-op.
+
+### Tracing
+
+Set `TracesSampleRate` and the middleware also records requests as spans for Flaggr's **Performance** page. That page shows throughput, p50/p95/p99 latency and failures per route, plus each trace's waterfall:
+
+```go
+reporter := errorreport.New(errorreport.Options{Token: token, Release: "checkout-api@2.8.1", TracesSampleRate: 0.1})
+mux.HandleFunc("GET /orders/{id}", getOrder)             // spans are named "GET /orders/{id}"
+http.ListenAndServe(":8080", reporter.Middleware(mux))
+
+func getOrder(w http.ResponseWriter, r *http.Request) {
+	span, ctx := reporter.StartSpan(r.Context(), "load order", "db.query") // a child span
+	defer span.End()
+	client := &http.Client{Transport: reporter.Transport(nil)}           // sends traceparent downstream
+	req, _ := http.NewRequestWithContext(ctx, "GET", pricingURL, nil)
+	_, _ = client.Do(req)
+}
+```
+
+How tracing behaves:
+
+- **Propagation.** The middleware continues an incoming W3C `traceparent` header. It follows a caller that sampled the trace; for a caller that didn't (such as a browser that only passes the ids along), it samples the trace at its own `TracesSampleRate` and keeps the trace id. `Transport` passes `traceparent` on to the services you call, and records each call as an `http.client` span.
+- **Linking errors to traces.** Errors captured with `WithRequest(r)` or `WithContext(ctx)` carry the trace id, so the issue links to its trace. This works even when the trace isn't sampled.
+- **Joining the browser.** An `X-Request-Id` request header is recorded on the span, and Flaggr uses it to find the page load that made the request.
 
 ## OpenFeature
 

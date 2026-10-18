@@ -20,8 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The oldest Go release go.mod allows, plus the two supported releases.
-        go: ['1.22', 'oldstable', 'stable']
+        # The Go release go.mod requires, and the latest one.
+        go: ['1.27', 'stable']
     steps:
       - uses: actions/checkout@v7
         with:
